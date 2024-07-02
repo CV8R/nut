@@ -99,6 +99,10 @@ void upsdrv_initinfo(void)
 
 	/* known Socomec Models */
 	switch (tab_reg[0]) {
+		case 30:
+			dstate_setinfo("ups.model", "%s", "ITY2-TW020B");   /* thanks to Shane Angelo <shane.angelo.75@gmail.com> */
+			break;
+		
 		case 130:
 			dstate_setinfo("ups.model", "%s", "DIGYS");
 			break;
