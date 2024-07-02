@@ -84,6 +84,33 @@ or `/dev/ttyUSB0` on Linux, or `/dev/ttyU0` on FreeBSD (note the capital "U").
 A built-in serial port can be identified as `/dev/ttyS0` on Linux or one of
 `/dev/cua*` names on FreeBSD.
 
+EXTRA ARGUMENTS
+---------------
+
+This driver supports the following optional settings in the
+linkman:ups.conf[5] file:
+
+Serial:
+~~~~~~
+
+*ser_baud_rate*='value'::
+A integer specifying the serial port baud rate (default 9600).
+
+*ser_data_bit*='value'::
+A integer specifying the serial port data bit (default 8).
+
+*ser_parity*='value'::
+A character specifying the serial port parity (default N).
+
+*ser_stop_bit*='value'::
+An integer specifying the serial port stop bit (default 1).
+
+Modbus:
+~~~~~~
+
+*rio_slave_id*='value'::
+An integer specifying the RIO modbus slave ID (default 1).
+
 INSTANT COMMANDS
 ----------------
 

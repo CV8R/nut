@@ -31,16 +31,30 @@
 #include <modbus.h>
 
 #define DRIVER_NAME	"Socomec jbus driver"
-#define DRIVER_VERSION	"0.08"
+#define DRIVER_VERSION	"0.09"
 
 #define CHECK_BIT(var,pos) ((var) & (1<<(pos)))
-#define MODBUS_SLAVE_ID 1
+
 #define BATTERY_RUNTIME_CRITICAL 15
+
+#define BAUD_RATE 9600
+#define PARITY 'N'
+#define DATA_BIT 8
+#define STOP_BIT 1
+#define MODBUS_SLAVE_ID 1
 
 /* Variables */
 static modbus_t *modbus_ctx = NULL;
 
 static int mrir(modbus_t * arg_ctx, int addr, int nb, uint16_t * dest);
+
+static int ser_baud_rate = BAUD_RATE;                      /* serial port baud rate */
+static char ser_parity = PARITY;                           /* serial port parity */
+static int ser_data_bit = DATA_BIT;                        /* serial port data bit */
+static int ser_stop_bit = STOP_BIT;                        /* serial port stop bit */
+static int rio_slave_id = MODBUS_SLAVE_ID;                 /* set device ID to default value */
+
+void get_config_vars(void);
 
 /* driver description structure */
 upsdrv_info_t upsdrv_info = {
@@ -440,6 +454,11 @@ void upsdrv_help(void)
 /* list flags and values that you want to receive via -x */
 void upsdrv_makevartable(void)
 {
+    addvar(VAR_VALUE, "ser_baud_rate", "serial port baud rate");
+	addvar(VAR_VALUE, "ser_parity", "serial port parity");
+	addvar(VAR_VALUE, "ser_data_bit", "serial port data bit");
+	addvar(VAR_VALUE, "ser_stop_bit", "serial port stop bit");
+	addvar(VAR_VALUE, "rio_slave_id", "Socomec modbus slave ID");
 }
 
 void upsdrv_initups(void)
@@ -447,14 +466,16 @@ void upsdrv_initups(void)
 	int r;
 	upsdebugx(2, "upsdrv_initups");
 
-	modbus_ctx = modbus_new_rtu(device_path, 9600, 'N', 8, 1);
+    get_config_vars();
+    
+	modbus_ctx = modbus_new_rtu(device_path, ser_baud_rate, ser_parity, ser_data_bit, ser_stop_bit);
 	if (modbus_ctx == NULL)
 		fatalx(EXIT_FAILURE, "Unable to create the libmodbus context");
 
-	r = modbus_set_slave(modbus_ctx, MODBUS_SLAVE_ID);	/* slave ID */
+	r = modbus_set_slave(modbus_ctx, rio_slave_id);	/* slave ID */
 	if (r < 0) {
 		modbus_free(modbus_ctx);
-		fatalx(EXIT_FAILURE, "Invalid modbus slave ID %d",MODBUS_SLAVE_ID);
+		fatalx(EXIT_FAILURE, "Invalid modbus slave ID %d",rio_slave_id);
 	}
 
 	if (modbus_connect(modbus_ctx) == -1) {
@@ -488,4 +509,44 @@ static int mrir(modbus_t * arg_ctx, int addr, int nb, uint16_t * dest)
 		upslogx(LOG_ERR, "mrir: modbus_read_input_registers(addr:%d, count:%d): %s (%s)", addr, nb, modbus_strerror(errno), device_path);
 	}
 	return r;
+}
+
+void get_config_vars(void)
+{
+    /* check if serial baud rate is set ang get the value */
+	if (testvar("ser_baud_rate")) {
+		ser_baud_rate = (int)strtol(getval("ser_baud_rate"), NULL, 10);
+	}
+	upsdebugx(2, "ser_baud_rate %d", ser_baud_rate);
+	
+	/* check if serial parity is set ang get the value */
+	if (testvar("ser_parity")) {
+		/* Dereference the char* we get */
+		char *sp = getval("ser_parity");
+		if (sp) {
+			/* TODO? Sanity-check the char we get? */
+			ser_parity = *sp;
+		} else {
+			upsdebugx(2, "Could not determine ser_parity, will keep default");
+		}
+	}
+	upsdebugx(2, "ser_parity %c", ser_parity);
+
+	/* check if serial data bit is set ang get the value */
+	if (testvar("ser_data_bit")) {
+		ser_data_bit = (int)strtol(getval("ser_data_bit"), NULL, 10);
+	}
+	upsdebugx(2, "ser_data_bit %d", ser_data_bit);
+
+	/* check if serial stop bit is set ang get the value */
+	if (testvar("ser_stop_bit")) {
+		ser_stop_bit = (int)strtol(getval("ser_stop_bit"), NULL, 10);
+	}
+	upsdebugx(2, "ser_stop_bit %d", ser_stop_bit);
+
+	/* check if device ID is set ang get the value */
+	if (testvar("rio_slave_id")) {
+		rio_slave_id = (int)strtol(getval("rio_slave_id"), NULL, 10);
+	}
+	upsdebugx(2, "rio_slave_id %d", rio_slave_id);
 }
