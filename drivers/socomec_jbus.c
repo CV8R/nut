@@ -31,11 +31,11 @@
 #include <modbus.h>
 
 #define DRIVER_NAME	"Socomec jbus driver"
-#define DRIVER_VERSION	"0.09"
+#define DRIVER_VERSION	"0.09.1"
 
 #define CHECK_BIT(var,pos) ((var) & (1<<(pos)))
 
-#define BATTERY_RUNTIME_CRITICAL 15
+#define BATTERY_RUNTIME_CRITICAL_PERCENT 30
 
 #define BAUD_RATE 9600
 #define PARITY 'N'
@@ -56,6 +56,12 @@ static int rio_slave_id = MODBUS_SLAVE_ID;                 /* set device ID to d
 
 void get_config_vars(void);
 
+/* Global variable declaration - SHOULD FIX THIS...*/
+int DISCHARGING_FLAG = -1;
+
+/*static int mwr(modbus_t *arg_ctx, int addr, uint16_t value);*/
+static int mwrs(modbus_t *ctx, int addr, int nb, uint16_t *src);
+
 /* driver description structure */
 upsdrv_info_t upsdrv_info = {
 	DRIVER_NAME,
@@ -64,6 +70,145 @@ upsdrv_info_t upsdrv_info = {
 	DRV_BETA,
 	{NULL}
 };
+
+static int instcmd(const char *cmdname, const char *extra)
+{
+	int r;
+	uint16_t val[16];
+	
+	/* Comes from example safenet.c */
+
+	upsdebugx(2, "instcmd");
+
+	
+	if (!strcasecmp(cmdname, "load.off")) {
+
+		val[0] = 0x05; /* Stand_by Mode enable*/
+
+		r = mwrs(modbus_ctx, 0x15B0, 1, val);
+		
+		upslogx(LOG_NOTICE, "instcmd: load.off: [%s] [%s]", cmdname, extra);	
+		
+		if (r != 1){
+				return STAT_INSTCMD_FAILED;
+			} else {
+				return STAT_INSTCMD_HANDLED;
+		}
+	}
+
+	if (!strcasecmp(cmdname, "load.on")) {
+
+		val[0] = 0x06; /* Stand_by Mode (UPS ON) disable */
+
+		r = mwrs(modbus_ctx, 0x15B0, 1, val);
+		
+		upslogx(LOG_NOTICE, "instcmd: load.on: [%s] [%s]", cmdname, extra);	
+		
+		if (r != 1){
+				return STAT_INSTCMD_FAILED;
+			} else {
+				return STAT_INSTCMD_HANDLED;
+		}
+	}
+
+	if (!strcasecmp(cmdname, "beeper.enable")) {
+
+		val[0] = 0x07; /* Buzzer Enable */
+
+		r = mwrs(modbus_ctx, 0x15B0, 1, val);
+		
+		upslogx(LOG_NOTICE, "instcmd: beeper.enable: [%s] [%s]", cmdname, extra);	
+		
+		if (r != 1){
+				return STAT_INSTCMD_FAILED;
+			} else {
+				return STAT_INSTCMD_HANDLED;
+		}
+	}
+
+	if (!strcasecmp(cmdname, "beeper.mute")) {
+
+		val[0] = 0x08; /* Buzzer Off */
+
+		r = mwrs(modbus_ctx, 0x15B0, 1, val);
+		
+		upslogx(LOG_NOTICE, "instcmd: beeper.mute: [%s] [%s]", cmdname, extra);	
+		
+		if (r != 1){
+				return STAT_INSTCMD_FAILED;
+			} else {
+				return STAT_INSTCMD_HANDLED;
+		}
+	}
+	
+	if (!strcasecmp(cmdname, "test.panel.start")) {
+
+		val[0] = 0x0D; /* Mimic panel LED test */
+
+		r = mwrs(modbus_ctx, 0x15B0, 1, val);
+		
+		upslogx(LOG_NOTICE, "instcmd: test.panel.start: [%s] [%s]", cmdname, extra);	
+		
+		if (r != 1){
+				return STAT_INSTCMD_FAILED;
+			} else {
+				return STAT_INSTCMD_HANDLED;
+		}
+	}
+
+	if (!strcasecmp(cmdname, "beeper.disable")) {
+
+		val[0] = 0x0E; /* Buzzer Disable */
+
+		r = mwrs(modbus_ctx, 0x15B0, 1, val);
+		
+		upslogx(LOG_NOTICE, "instcmd: beeper.disable: [%s] [%s]", cmdname, extra);	
+		
+		if (r != 1){
+				return STAT_INSTCMD_FAILED;
+			} else {
+				return STAT_INSTCMD_HANDLED;
+		}
+	}
+
+	if (!strcasecmp(cmdname, "test.battery.start")) {
+
+		val[0] = 0x10; /* Immediate Battery Test */
+
+		r = mwrs(modbus_ctx, 0x15B0, 1, val);
+		
+		upslogx(LOG_NOTICE, "instcmd: test.battery.start: [%s] [%s]", cmdname, extra);	
+		
+		if (r != 1){
+				return STAT_INSTCMD_FAILED;
+			} else {
+				return STAT_INSTCMD_HANDLED;
+		}
+	}
+
+	if (!strcasecmp(cmdname, "shutdown.return")) {
+
+		val[0] = 0x00; /* MSB */
+		val[1] = 0x1E; /* LSB 30 Seconds*/
+		val[2] = 0x00; /* MSB */
+		val[3] = 0x01; /* LSB 2 Minute*/
+		val[4] = 0x04; /* Scheduling Type 0-15 One Shot */
+
+		r = mwrs(modbus_ctx, 0x1580, 5, val);
+		
+		upslogx(LOG_NOTICE, "instcmd: shutdown.return: [%s] [%s]", cmdname, extra);	
+		
+		if (r != 1){
+				return STAT_INSTCMD_FAILED;
+			} else {
+				return STAT_INSTCMD_HANDLED;
+		}
+	}
+
+
+	upslogx(LOG_NOTICE, "instcmd: unknown command [%s] [%s]", cmdname, extra);
+	return STAT_INSTCMD_UNKNOWN;
+}
 
 void upsdrv_initinfo(void)
 {
@@ -100,9 +245,9 @@ void upsdrv_initinfo(void)
 	/* known Socomec Models */
 	switch (tab_reg[0]) {
 		case 30:
-			dstate_setinfo("ups.model", "%s", "ITY2-TW020B");   /* thanks to Shane Angelo <shane.angelo.75@gmail.com> */
+			dstate_setinfo("ups.model", "%s", "ITYS");   /* thanks to CV8R https://github.com/CV8R */
 			break;
-		
+
 		case 130:
 			dstate_setinfo("ups.model", "%s", "DIGYS");
 			break;
@@ -128,9 +273,18 @@ void upsdrv_initinfo(void)
 													  (tab_reg[7]&0xFF), (tab_reg[7]>>8)
 												);
 	}
+	
+	dstate_addcmd("load.on");
+	dstate_addcmd("load.off");
+	dstate_addcmd("beeper.enable");
+	dstate_addcmd("beeper.mute"); /* Temporary mute buzzer */
+	dstate_addcmd("beeper.disable");
+	dstate_addcmd("test.panel.start");
+	dstate_addcmd("test.battery.start");
+	dstate_addcmd("shutdown.return");
 
-	/* upsh.instcmd = instcmd; */
-	/* upsh.setvar = setvar; */
+	upsh.instcmd = instcmd;
+
 }
 
 void upsdrv_updateinfo(void)
@@ -169,7 +323,7 @@ void upsdrv_updateinfo(void)
 	dstate_setinfo("ups.date", "%04d/%02d/%02d", (tab_reg[3]+2000), (tab_reg[2]>>8), (tab_reg[1]>>8) );
 
 	/* ups status */
-	r = mrir(modbus_ctx, 0x1020, 6, tab_reg);
+	r = mrir(modbus_ctx, 0x1020, 4, tab_reg);
 	
 	if (r == -1) {
 		upsdebugx(2, "Did not receive any data from the UPS at 0x1020 ! Ignoring ? r is %d error %s", r, modbus_strerror(errno));
@@ -179,18 +333,32 @@ void upsdrv_updateinfo(void)
 		*/
 	}
 
-	if (CHECK_BIT(tab_reg[0], 0))
+	if (CHECK_BIT(tab_reg[0], 0)){
 		upsdebugx(2, "Rectifier Input supply present");
-	if (CHECK_BIT(tab_reg[0], 1))
+		/* OL Receiving energy from public power supply*/
+		status_set("OL");
+		DISCHARGING_FLAG = 0; //Set we are not discharging
+		}
+	if (CHECK_BIT(tab_reg[0], 1)){
 		upsdebugx(2, "Inverter ON ");
+		}
+		else
+		{
+		/* Inverter is OFF Set UPS in OFF State */
+		status_set("OFF");
+		}
 	if (CHECK_BIT(tab_reg[0], 2))
 		upsdebugx(2, "Rectifier ON");
 	if (CHECK_BIT(tab_reg[0], 3))
 		upsdebugx(2, "Load protected by inverter");
 	if (CHECK_BIT(tab_reg[0], 4))
 		upsdebugx(2, "Load on automatic bypass");
-	if (CHECK_BIT(tab_reg[0], 5))
+	if (CHECK_BIT(tab_reg[0], 5)){
 		upsdebugx(2, "Load on battery");
+		/* Set on Battery Condition */
+		status_set("OB");
+		DISCHARGING_FLAG = 1; //Set we are now discharging
+		}
 	if (CHECK_BIT(tab_reg[0], 6))
 		upsdebugx(2, "Remote controls disable");
 	if (CHECK_BIT(tab_reg[0], 7))
@@ -198,11 +366,16 @@ void upsdrv_updateinfo(void)
 
 	if (CHECK_BIT(tab_reg[0], 14))
 		upsdebugx(2, "Battery Test failed");
-	if (CHECK_BIT(tab_reg[0], 15))
-		upsdebugx(2, "Battery near end of backup time");
+	if (CHECK_BIT(tab_reg[0], 15)){
+		upsdebugx(2, "Battery near end of backup time (Low battery)");
+		if (BATTERY_RUNTIME_CRITICAL_PERCENT == -1) {
+			upsdebugx(2, "Low battery - Using UPS Low Battery Metric");
+			/* Set on Battery Condition */
+			status_set("LB");
+			}
+	}
 	if (CHECK_BIT(tab_reg[0], 16))
 		upsdebugx(2, "Battery disacharged");
-
 	if (CHECK_BIT(tab_reg[1], 0))
 		upsdebugx(2, "Battery OK");
 	if (CHECK_BIT(tab_reg[1], 10))
@@ -409,17 +582,16 @@ void upsdrv_updateinfo(void)
 		dstate_setinfo("ambient.1.temperature", "%u", tab_reg[22] );
 	}
 
-	if (tab_reg[23] == 0xFFFF) {
-		/* battery.runtime == 0xFFFF means we're on mains */
-		status_set("OL");
-	}
-	else if (tab_reg[23] > BATTERY_RUNTIME_CRITICAL) {
-		/* we still have mora than BATTERY_RUNTIME_CRITICAL min left ? */
-		status_set("OB");
-	}
-	else {
+	/* NOTE tab_reg[23] == 0xFFFF returns 0xFFFF all the time on the ITYS so need another way */
+
+
+	if ((BATTERY_RUNTIME_CRITICAL_PERCENT != 0) && (DISCHARGING_FLAG == 1) && (tab_reg[4] < BATTERY_RUNTIME_CRITICAL_PERCENT)) {
+		/* battery.charge */
+		/* Battery level below BATTERY_RUNTIME_CRITICAL_PERCENT left ? */
+		upsdebugx(2, "Low battery - Using Driver Defined Low Battery Percentage Metric");
 		status_set("LB");
 	}
+
 
 	/*TODO:
 	--essential
@@ -433,8 +605,6 @@ void upsdrv_updateinfo(void)
 	shutdown.reboot
 	shutdown.reboot.graceful
 	bypass.start
-	beeper.enable
-	beeper.disable
 	*/
 
 	alarm_commit();
@@ -446,9 +616,23 @@ void upsdrv_updateinfo(void)
 
 void upsdrv_shutdown(void)
 {
-	/* replace with a proper shutdown function */
-	upslogx(LOG_ERR, "shutdown not supported");
-	set_exit_flag(-1);
+	int r;
+	uint16_t val[16];
+
+	val[0] = 0x00; /* MSB */
+	val[1] = 0x1E; /* LSB 30 Seconds*/
+	val[2] = 0x00; /* MSB */
+	val[3] = 0x01; /* LSB 1 Minute*/
+	val[4] = 0x04; /* Scheduling Type 0-15 eith restore time delay */
+
+	r = mwrs(modbus_ctx, 0x1580, 5, val);
+	
+	upslogx(LOG_NOTICE, "Shutdown UPS and return with OL");	
+	
+	if (r != 1){
+		upslogx(LOG_ERR, "upsdrv_shutdown failed!");
+		set_exit_flag(-1);	
+	}
 }
 
 void upsdrv_help(void)
@@ -470,8 +654,8 @@ void upsdrv_initups(void)
 	int r;
 	upsdebugx(2, "upsdrv_initups");
 
-    get_config_vars();
-    
+	get_config_vars();
+
 	modbus_ctx = modbus_new_rtu(device_path, ser_baud_rate, ser_parity, ser_data_bit, ser_stop_bit);
 	if (modbus_ctx == NULL)
 		fatalx(EXIT_FAILURE, "Unable to create the libmodbus context");
@@ -515,6 +699,19 @@ static int mrir(modbus_t * arg_ctx, int addr, int nb, uint16_t * dest)
 	return r;
 }
 
+static int mwrs(modbus_t *ctx, int addr, int nb, uint16_t *src)
+{
+	int r = -1;
+	r = modbus_write_registers(ctx, addr, nb, src);
+	
+	if (r == -1) {
+		upslogx(LOG_ERR, "mrir: modbus_write_registers(addr:%d, count:%d): %s (%s)", addr, nb, modbus_strerror(errno), device_path);
+	}
+
+	return r;
+
+}
+
 void get_config_vars(void)
 {
     /* check if serial baud rate is set ang get the value */
@@ -522,7 +719,7 @@ void get_config_vars(void)
 		ser_baud_rate = (int)strtol(getval("ser_baud_rate"), NULL, 10);
 	}
 	upsdebugx(2, "ser_baud_rate %d", ser_baud_rate);
-	
+
 	/* check if serial parity is set ang get the value */
 	if (testvar("ser_parity")) {
 		/* Dereference the char* we get */
