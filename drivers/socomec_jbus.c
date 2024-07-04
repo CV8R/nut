@@ -31,7 +31,7 @@
 #include <modbus.h>
 
 #define DRIVER_NAME	"Socomec jbus driver"
-#define DRIVER_VERSION	"0.09.2"
+#define DRIVER_VERSION	"0.09.3"
 
 #define CHECK_BIT(var,pos) ((var) & (1<<(pos)))
 
@@ -205,6 +205,20 @@ static int instcmd(const char *cmdname, const char *extra)
 		}
 	}
 
+	if (!strcasecmp(cmdname, "shutdown.stayoff")) {
+
+		val[0] = 0x05; /* Stand_by Mode enable*/
+
+		r = mwrs(modbus_ctx, 0x15B0, 1, val);
+		
+		upslogx(LOG_NOTICE, "shutdown.stayoff: [%s] [%s]", cmdname, extra);	
+		
+		if (r != 1){
+				return STAT_INSTCMD_FAILED;
+			} else {
+				return STAT_INSTCMD_HANDLED;
+		}
+	}
 
 	upslogx(LOG_NOTICE, "instcmd: unknown command [%s] [%s]", cmdname, extra);
 	return STAT_INSTCMD_UNKNOWN;
@@ -282,6 +296,8 @@ void upsdrv_initinfo(void)
 	dstate_addcmd("test.panel.start");
 	dstate_addcmd("test.battery.start");
 	dstate_addcmd("shutdown.return");
+	dstate_addcmd("shutdown.stayoff");
+	
 
 	upsh.instcmd = instcmd;
 
