@@ -31,7 +31,7 @@
 #include <modbus.h>
 
 #define DRIVER_NAME	"Socomec jbus driver"
-#define DRIVER_VERSION	"0.09.1"
+#define DRIVER_VERSION	"0.09.2"
 
 #define CHECK_BIT(var,pos) ((var) & (1<<(pos)))
 
@@ -332,9 +332,11 @@ void upsdrv_updateinfo(void)
 		return;
 		*/
 	}
-
-	if (CHECK_BIT(tab_reg[0], 0)){
+	if (CHECK_BIT(tab_reg[0], 0))
 		upsdebugx(2, "Rectifier Input supply present");
+	if ((CHECK_BIT(tab_reg[0], 0) != 0) && (CHECK_BIT(tab_reg[0], 5) == 0)) {
+		/*If On Input Supply and Not On Battery then set OL - UPS reports both OL and OB when changing back to OL*/
+		upsdebugx(2, "Load On line");
 		/* OL Receiving energy from public power supply*/
 		status_set("OL");
 		DISCHARGING_FLAG = 0; //Set we are not discharging
