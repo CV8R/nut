@@ -31,11 +31,28 @@
 #include <modbus.h>
 
 #define DRIVER_NAME	"Socomec jbus driver"
-#define DRIVER_VERSION	"0.09.3"
+#define DRIVER_VERSION	"0.09.4"
 
 #define CHECK_BIT(var,pos) ((var) & (1<<(pos)))
 
-#define BATTERY_RUNTIME_CRITICAL_PERCENT 30
+#define BATTERY_CHARGE_LOW_PERCENT 10  // battery.charge.low See Below on Warning about using override.something in ups.conf
+/* https://github.com/networkupstools/nut/wiki/Ensure-UPS-settings-with-volatile-device-memory */
+
+/* Note for me the above workaround does not work because nut appears to restart before shutting down the UPS
+	hence, we can use the vars in ups.conf */
+
+
+#define SCHEDULE_DELAY_OFF 20 //Seconds to pass before UPS goes into Standby | Allowed seconds 20 to 600 secs
+#define SCHEDULE_MIN_OFF 1 // Minutes of UPS Standby Operations | Allowed minutes 1 to 9999 mins
+#define SCHEDULING_TYPE 4 // Scheuling Type | Allowed 0, 1 or 4
+
+/* SCHEDULING_TYPES
+0 = no scheduling / reset pendign schedule
+1 = one_shot
+2 = not used
+3 = not used
+4 = UPS shutdown management with restor time delay
+*/
 
 #define BAUD_RATE 9600
 #define PARITY 'N'
@@ -47,6 +64,7 @@
 static modbus_t *modbus_ctx = NULL;
 
 static int mrir(modbus_t * arg_ctx, int addr, int nb, uint16_t * dest);
+static int mwrs(modbus_t *ctx, int addr, int nb, uint16_t *src);
 
 static int ser_baud_rate = BAUD_RATE;                      /* serial port baud rate */
 static char ser_parity = PARITY;                           /* serial port parity */
@@ -56,11 +74,16 @@ static int rio_slave_id = MODBUS_SLAVE_ID;                 /* set device ID to d
 
 void get_config_vars(void);
 
-/* Global variable declaration - SHOULD FIX THIS...*/
 int DISCHARGING_FLAG = -1;
 
-/*static int mwr(modbus_t *arg_ctx, int addr, uint16_t value);*/
-static int mwrs(modbus_t *ctx, int addr, int nb, uint16_t *src);
+static int battery_charge_low = BATTERY_CHARGE_LOW_PERCENT;
+
+static uint16_t sch_delay_off = SCHEDULE_DELAY_OFF; 
+static uint16_t sch_min_off = SCHEDULE_MIN_OFF; //sch_min_off - minutes becuase UPS is set in minutes not secs.
+static uint16_t sch_scheduletype = SCHEDULING_TYPE; // Schedule Types
+
+
+
 
 /* driver description structure */
 upsdrv_info_t upsdrv_info = {
@@ -186,17 +209,66 @@ static int instcmd(const char *cmdname, const char *extra)
 		}
 	}
 
+	if (!strcasecmp(cmdname, "load.off.delay")) {
+	
+			upslogx(LOG_NOTICE, "instcmd: load.off.delay [%s] [%s]", cmdname, extra);
+
+
+		uint8_t sch_delay_off_MSB = (uint8_t)((sch_delay_off & 0xFF00) >> 8);
+		uint8_t sch_delay_off_LSB = (uint8_t)(sch_delay_off & 0x00FF);
+		uint8_t sch_min_off_MSB = (uint8_t)((sch_min_off & 0xFF00) >> 8);
+		uint8_t sch_min_off_LSB = (uint8_t)(sch_min_off & 0x00FF);
+
+		val[0] = sch_delay_off_MSB;
+		val[1] = sch_delay_off_LSB;
+		val[2] = sch_min_off_MSB;
+		val[3] = sch_min_off_LSB;
+		val[4] = sch_scheduletype;
+
+		upsdebugx(4, "sch_delay_off_MSB - MSB: %02x", sch_delay_off_MSB);
+		upsdebugx(4, "sch_delay_off_LSB - LSB: %02x", sch_delay_off_LSB);
+		upsdebugx(4, "sch_min_off_MSB - MSB Dec: %02x", sch_min_off_MSB);
+		upsdebugx(4, "sch_min_off_LSB - LSB Dec: %02x", sch_min_off_LSB);
+		
+		upsdebugx(2, "Schedule Delay OFF: %d seconds", (sch_delay_off_MSB << 8) | sch_delay_off_LSB);
+		upsdebugx(2, "Schedule Min OFF: %d minutes", (sch_min_off_MSB << 8) | sch_min_off_LSB);
+
+		upslogx(LOG_NOTICE, "Shutdown UPS after [%d]secs and return with OL after [%d]secs | [%s] [%s]", sch_delay_off, sch_min_off*60, cmdname, extra );	
+		
+		r = mwrs(modbus_ctx, 0x1580, 5, val);
+				
+		if (r != 1){
+				return STAT_INSTCMD_FAILED;
+			} else {
+				return STAT_INSTCMD_HANDLED;
+		}
+	}
+
 	if (!strcasecmp(cmdname, "shutdown.return")) {
 
-		val[0] = 0x00; /* MSB */
-		val[1] = 0x1E; /* LSB 30 Seconds*/
-		val[2] = 0x00; /* MSB */
-		val[3] = 0x01; /* LSB 2 Minute*/
-		val[4] = 0x04; /* Scheduling Type 0-15 One Shot */
+		uint8_t sch_delay_off_MSB = (uint8_t)((sch_delay_off & 0xFF00) >> 8);
+		uint8_t sch_delay_off_LSB = (uint8_t)(sch_delay_off & 0x00FF);
+		uint8_t sch_min_off_MSB = (uint8_t)((sch_min_off & 0xFF00) >> 8);
+		uint8_t sch_min_off_LSB = (uint8_t)(sch_min_off & 0x00FF);
+
+		val[0] = sch_delay_off_MSB;
+		val[1] = sch_delay_off_LSB;
+		val[2] = sch_min_off_MSB;
+		val[3] = sch_min_off_LSB;
+		val[4] = sch_scheduletype;
+
+		upsdebugx(4, "sch_delay_off_MSB - MSB: %02x", sch_delay_off_MSB);
+		upsdebugx(4, "sch_delay_off_LSB - LSB: %02x", sch_delay_off_LSB);
+		upsdebugx(4, "sch_min_off_MSB - MSB Dec: %02x", sch_min_off_MSB);
+		upsdebugx(4, "sch_min_off_LSB - LSB Dec: %02x", sch_min_off_LSB);
+		
+		upsdebugx(2, "Schedule Delay OFF: %d seconds", (sch_delay_off_MSB << 8) | sch_delay_off_LSB);
+		upsdebugx(2, "Schedule Min OFF: %d minutes", (sch_min_off_MSB << 8) | sch_min_off_LSB);
+
+		upslogx(LOG_NOTICE, "Shutdown UPS after [%d]secs and return with OL after [%d]secs | [%s] [%s]", sch_delay_off, sch_min_off*60, cmdname, extra );	
 
 		r = mwrs(modbus_ctx, 0x1580, 5, val);
 		
-		upslogx(LOG_NOTICE, "instcmd: shutdown.return: [%s] [%s]", cmdname, extra);	
 		
 		if (r != 1){
 				return STAT_INSTCMD_FAILED;
@@ -224,6 +296,50 @@ static int instcmd(const char *cmdname, const char *extra)
 	return STAT_INSTCMD_UNKNOWN;
 }
 
+
+
+static int setvar(const char *varname, const char *val)
+{
+	int r;
+	
+	if (!strcasecmp(varname, "battery.charge.low")) {
+		upsdebugx(2, "Setting Variable: [%s] to [%s]", varname, val);
+		dstate_setinfo("battery.charge.low", "%s", val);
+		battery_charge_low = atoi(val);
+		return STAT_SET_HANDLED;
+	}
+
+	if (!strcasecmp(varname, "ups.timer.shutdown")) {
+		upsdebugx(2, "Setting Variable: [%s] to [%s]", varname, val);
+		dstate_setinfo("ups.timer.shutdown", "%s", val);
+		sch_delay_off = atoi(val);
+		return STAT_SET_HANDLED;
+	}
+
+	if (!strcasecmp(varname, "ups.delay.start")) {
+		//check if divisible by 60
+		if (atoi(val) % 60 == 0) {
+		upsdebugx(2, "Setting Variable: [%s] to [%d] seconds", varname, atoi(val));
+		r = dstate_setinfo("ups.delay.start", "%d", atoi(val));
+		sch_min_off  = (atoi(val) / 60); //put back in minutes
+		upsdebugx(4, "Setting Variable: [%s] to [%d] minutes", varname, sch_min_off);
+			if (r !=1)
+				return STAT_SET_FAILED;
+			else
+				return STAT_SET_HANDLED;
+		}
+		else
+		{
+			upsdebugx(2, "Setting Variable: [%s] to [%d] seconds FAILED needs to be divisible by 60", varname, atoi(val));
+			return STAT_SET_FAILED;
+		}
+	}
+
+	upslogx(LOG_NOTICE, "setvar: unknown variable [%s]", varname);
+	return STAT_SET_UNKNOWN;
+}
+
+
 void upsdrv_initinfo(void)
 {
 	uint16_t tab_reg[12];
@@ -234,7 +350,20 @@ void upsdrv_initinfo(void)
 	dstate_setinfo("device.mfr", "socomec jbus");
 	dstate_setinfo("device.model", "Socomec Generic");
 
+	dstate_setinfo("battery.charge.low", "%d", battery_charge_low);
+	dstate_setflags("battery.charge.low",  ST_FLAG_RW );
+	dstate_addrange("battery.charge.low", 10, 100);
+
+	dstate_setinfo("ups.timer.shutdown", "%d", sch_delay_off);
+	dstate_setflags("ups.timer.shutdown", ST_FLAG_RW );
+	dstate_addrange("ups.timer.shutdown", 20, 600);
+
+	dstate_setinfo("ups.delay.start", "%d", sch_min_off*60); // upsrw var is entered in seconds but UPS responds in minutes
+	dstate_setflags("ups.delay.start", ST_FLAG_RW );
+	dstate_addrange("ups.delay.start", 60, 599940); // upsrw var is entered in seconds but UPS responds in minutes
+
 	upsdebugx(2, "initial read");
+
 
 	/* 
 		this is a neat trick, but not really helpful right now
@@ -295,11 +424,12 @@ void upsdrv_initinfo(void)
 	dstate_addcmd("beeper.disable");
 	dstate_addcmd("test.panel.start");
 	dstate_addcmd("test.battery.start");
+	dstate_addcmd("load.off.delay");
 	dstate_addcmd("shutdown.return");
 	dstate_addcmd("shutdown.stayoff");
 	
-
 	upsh.instcmd = instcmd;
+	upsh.setvar = setvar;
 
 }
 
@@ -385,9 +515,9 @@ void upsdrv_updateinfo(void)
 	if (CHECK_BIT(tab_reg[0], 14))
 		upsdebugx(2, "Battery Test failed");
 	if (CHECK_BIT(tab_reg[0], 15)){
-		upsdebugx(2, "Battery near end of backup time (Low battery)");
-		if (BATTERY_RUNTIME_CRITICAL_PERCENT == -1) {
-			upsdebugx(2, "Low battery - Using UPS Low Battery Metric");
+		upsdebugx(2, "UPS reporing - Battery near end of Back-up (Low Battery)");
+		if (battery_charge_low == -1) {
+			upsdebugx(2, "Low Battery Condition (LB)");
 			/* Set on Battery Condition */
 			status_set("LB");
 			}
@@ -600,16 +730,14 @@ void upsdrv_updateinfo(void)
 		dstate_setinfo("ambient.1.temperature", "%u", tab_reg[22] );
 	}
 
-	/* NOTE tab_reg[23] == 0xFFFF returns 0xFFFF all the time on the ITYS so need another way */
+	/* NOTE tab_reg[23] == 0xFFFF returns 0xFFFF all the time on the ITYS so need another way of detecting low batt */
 
-
-	if ((BATTERY_RUNTIME_CRITICAL_PERCENT != 0) && (DISCHARGING_FLAG == 1) && (tab_reg[4] < BATTERY_RUNTIME_CRITICAL_PERCENT)) {
-		/* battery.charge */
-		/* Battery level below BATTERY_RUNTIME_CRITICAL_PERCENT left ? */
-		upsdebugx(2, "Low battery - Using Driver Defined Low Battery Percentage Metric");
+	if ((DISCHARGING_FLAG == 1) && (tab_reg[4] < battery_charge_low)) {
+		/* Discharging and Battery Level Below battery_charge_low so Set LB */
+		upsdebugx(2, "Low Battery Condition (LB)");
 		status_set("LB");
 	}
-
+ 
 
 	/*TODO:
 	--essential
@@ -632,25 +760,43 @@ void upsdrv_updateinfo(void)
 	return;
 }
 
+
+
 void upsdrv_shutdown(void)
 {
 	int r;
 	uint16_t val[16];
 
-	val[0] = 0x00; /* MSB */
-	val[1] = 0x1E; /* LSB 30 Seconds*/
-	val[2] = 0x00; /* MSB */
-	val[3] = 0x01; /* LSB 1 Minute*/
-	val[4] = 0x04; /* Scheduling Type 0-15 eith restore time delay */
+	uint8_t sch_delay_off_MSB = (uint8_t)((sch_delay_off & 0xFF00) >> 8);
+	uint8_t sch_delay_off_LSB = (uint8_t)(sch_delay_off & 0x00FF);
+	uint8_t sch_min_off_MSB = (uint8_t)((sch_min_off & 0xFF00) >> 8);
+	uint8_t sch_min_off_LSB = (uint8_t)(sch_min_off & 0x00FF);
+
+	val[0] = sch_delay_off_MSB;
+	val[1] = sch_delay_off_LSB;
+	val[2] = sch_min_off_MSB;
+	val[3] = sch_min_off_LSB;
+	val[4] = sch_scheduletype;
+
+	upsdebugx(4, "sch_delay_off_MSB - MSB: %02x", sch_delay_off_MSB);
+	upsdebugx(4, "sch_delay_off_LSB - LSB: %02x", sch_delay_off_LSB);
+	upsdebugx(4, "sch_min_off_MSB - MSB Dec: %02x", sch_min_off_MSB);
+	upsdebugx(4, "sch_min_off_LSB - LSB Dec: %02x", sch_min_off_LSB);
+	
+	upsdebugx(2, "Schedule Delay OFF: %d seconds", (sch_delay_off_MSB << 8) | sch_delay_off_LSB);
+	upsdebugx(2, "Schedule Min OFF: %d minutes", (sch_min_off_MSB << 8) | sch_min_off_LSB);
+		
+	upslogx(LOG_NOTICE, "Shutdown UPS after [%d]secs and return with OL after [%d]secs", sch_delay_off, sch_min_off*60 );	
 
 	r = mwrs(modbus_ctx, 0x1580, 5, val);
 	
-	upslogx(LOG_NOTICE, "Shutdown UPS and return with OL");	
 	
 	if (r != 1){
 		upslogx(LOG_ERR, "upsdrv_shutdown failed!");
 		set_exit_flag(-1);	
 	}
+	else
+		set_exit_flag(-2);	/* EXIT_SUCCESS */
 }
 
 void upsdrv_help(void)
@@ -665,6 +811,11 @@ void upsdrv_makevartable(void)
 	addvar(VAR_VALUE, "ser_data_bit", "serial port data bit");
 	addvar(VAR_VALUE, "ser_stop_bit", "serial port stop bit");
 	addvar(VAR_VALUE, "rio_slave_id", "Socomec modbus slave ID");
+
+	addvar(VAR_VALUE, "battery_charge_low_percent", "Socomec Battery Charge Low [Percentage]");
+	addvar(VAR_VALUE, "sch_delay_off_sec", "Socomec seconds that pass before UPS Off 20-600 [sec]");
+	addvar(VAR_VALUE, "sch_min_off", "Socomec minutes of Stand-by 1-9999 [min]");
+	addvar(VAR_VALUE, "scheduletype_1or4", "Socomec schedule type 1 Oneshot or 4 Schedule <default 4>");
 }
 
 void upsdrv_initups(void)
@@ -768,4 +919,35 @@ void get_config_vars(void)
 		rio_slave_id = (int)strtol(getval("rio_slave_id"), NULL, 10);
 	}
 	upsdebugx(2, "rio_slave_id %d", rio_slave_id);
+
+
+	/* Since Socomec does not allow us to store the timeouts in
+	   Non-Volatile RAM we create some config vars in ups.conf
+	   this allows us to override the defaults for low bat, delay
+	   to turn off load and restore load. */
+
+    /* check if battery charge low override is set ang get the value */
+	if (testvar("battery_charge_low_percent")) {
+		battery_charge_low = (int)strtol(getval("battery_charge_low_percent"), NULL, 10);
+	}
+	upsdebugx(2, "battery_charge_low %d", battery_charge_low);
+
+    /* check if schedule delay off time override is set ang get the value */
+	if (testvar("sch_delay_off_sec")) {
+		sch_delay_off = (int)strtol(getval("sch_delay_off_sec"), NULL, 10);
+	}
+	upsdebugx(2, "sch_delay_off %d", sch_delay_off);
+
+    /* check if schedule minutes off Stand-by Off time override is set ang get the value */
+	if (testvar("sch_min_off")) {
+		sch_min_off = (int)strtol(getval("sch_min_off"), NULL, 10);
+	}
+	upsdebugx(2, "sch_min_off %d", sch_min_off);
+
+    /* check if schedule type override is set ang get the value */
+	if (testvar("scheduletype_1or4")) {
+		sch_scheduletype = (int)strtol(getval("scheduletype_1or4"), NULL, 10);
+	}
+	upsdebugx(2, "sch_scheduletype %d", sch_scheduletype);
+
 }
