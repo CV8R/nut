@@ -31,18 +31,18 @@
 #include <modbus.h>
 
 #define DRIVER_NAME	"Socomec jbus driver"
-#define DRIVER_VERSION	"0.09.4"
+#define DRIVER_VERSION	"0.09.6"
 
 #define CHECK_BIT(var,pos) ((var) & (1<<(pos)))
 
-#define BATTERY_CHARGE_LOW_PERCENT 10  // battery.charge.low See Below on Warning about using override.something in ups.conf
+#define BATTERY_CHARGE_LOW_PERCENT 20  // battery.charge.low See Below on Warning about using override.something in ups.conf
 /* https://github.com/networkupstools/nut/wiki/Ensure-UPS-settings-with-volatile-device-memory */
 
 /* Note for me the above workaround does not work because nut appears to restart before shutting down the UPS
 	hence, we can use the vars in ups.conf */
 
 
-#define SCHEDULE_DELAY_OFF 20 //Seconds to pass before UPS goes into Standby | Allowed seconds 20 to 600 secs
+#define SCHEDULE_DELAY_OFF 30 //Seconds to pass before UPS goes into Standby | Allowed seconds 20 to 600 secs
 #define SCHEDULE_MIN_OFF 1 // Minutes of UPS Standby Operations | Allowed minutes 1 to 9999 mins
 #define SCHEDULING_TYPE 4 // Scheuling Type | Allowed 0, 1 or 4
 
@@ -457,6 +457,48 @@ void upsdrv_updateinfo(void)
 	dstate_setinfo("output.frequency", "%u", tab_reg[3]);
 
 	upsdebugx(2, "battery capacity (Ah * 10) %u", tab_reg[8]);
+	upsdebugx(2, "battery capacity (Ah) %.2f", tab_reg[8]/(float)10);
+	
+	dstate_setinfo("battery.capacity", "%.2f", tab_reg[8]/(float)10);
+	
+	/* Input Mode */
+	switch (tab_reg[26]) {
+		case 1:
+			upsdebugx(2, "Input mode 1: NORMAL");
+			break;
+
+		case 2:
+			upsdebugx(2, "Input mode 2: WIDE");
+			break;
+		
+		default:
+			upsdebugx(2, "Input mode: unknown");
+	}
+
+	upsdebugx(2, "Vout setting: %u", tab_reg[27]);
+	
+	if (tab_reg[28] != 0xFFFF){
+		/* Battery Extensions */
+		switch (tab_reg[28]) {
+			case 0:
+				upsdebugx(2, "Battery Extensions: 0");
+				break;
+
+			case 1:
+				upsdebugx(2, "Battery Extensions: 1");
+				dstate_setinfo("battery.packs.external", "%u", tab_reg[28]);
+				break;
+			
+			case 2:
+				upsdebugx(2, "Battery Extensions: 2");
+				dstate_setinfo("battery.packs.external", "%u", tab_reg[28]);
+				break;
+			
+			default:
+				upsdebugx(2, "Battery Extensions: unknown");
+		}
+	}
+
 	upsdebugx(2, "battery elements %u", tab_reg[9]);
 	
 	/* time and date */
@@ -465,8 +507,10 @@ void upsdrv_updateinfo(void)
 		upsdebugx(2, "Did not receive any data from the UPS at 0x1360 ! Ignoring ? r is %d error %s", r, modbus_strerror(errno));
 	}
 
-	dstate_setinfo("ups.time", "%02d:%02d:%02d", (tab_reg[1]&0xFF), (tab_reg[0]>>8), (tab_reg[0]&0xFF) );
-	dstate_setinfo("ups.date", "%04d/%02d/%02d", (tab_reg[3]+2000), (tab_reg[2]>>8), (tab_reg[1]>>8) );
+	if (tab_reg[0] != 0xFFFF && tab_reg[1] != 0xFFFF)
+		dstate_setinfo("ups.time", "%02d:%02d:%02d", (tab_reg[1]&0xFF), (tab_reg[0]>>8), (tab_reg[0]&0xFF) );
+	if (tab_reg[2] != 0xFFFF && tab_reg[03] != 0xFFFF)
+		dstate_setinfo("ups.date", "%04d/%02d/%02d", (tab_reg[3]+2000), (tab_reg[2]>>8), (tab_reg[1]>>8) );
 
 	/* ups status */
 	r = mrir(modbus_ctx, 0x1020, 4, tab_reg);
@@ -679,11 +723,13 @@ void upsdrv_updateinfo(void)
 	if (tab_reg[1] == 0xFFFF && tab_reg[2] == 0xFFFF) {
 		/* this a 1-phase model */
 		dstate_setinfo("input.phases", "1" );
-		dstate_setinfo("ups.load", "%u", tab_reg[0] );
+		if (tab_reg[0] != 0xFFFF)
+			dstate_setinfo("ups.load", "%u", tab_reg[0] );
+		if (tab_reg[6] != 0xFFFF)
+			dstate_setinfo("input.bypass.voltage", "%u", tab_reg[6] );
 
-		dstate_setinfo("input.bypass.voltage", "%u", tab_reg[6] );
-
-		dstate_setinfo("output.voltage", "%u", tab_reg[9] );
+		if (tab_reg[9] != 0xFFFF)
+			dstate_setinfo("output.voltage", "%u", tab_reg[9] );
 
 		if (tab_reg[15] != 0xFFFF)
 			dstate_setinfo("output.current", "%u", tab_reg[15] );
@@ -710,22 +756,30 @@ void upsdrv_updateinfo(void)
 			dstate_setinfo("output.L1.current", "%u", tab_reg[15] );
 		
 		if (tab_reg[16] != 0xFFFF)
-		dstate_setinfo("output.L2.current", "%u", tab_reg[16] );
+			dstate_setinfo("output.L2.current", "%u", tab_reg[16] );
 
 		if (tab_reg[17] != 0xFFFF)
 			dstate_setinfo("output.L3.current", "%u", tab_reg[17] );
 	}
 
-	dstate_setinfo("battery.charge", "%u", tab_reg[4] );
-	dstate_setinfo("battery.capacity", "%u", (tab_reg[5]/10) );
-	dstate_setinfo("battery.voltage", "%.2f", (double) (tab_reg[20]) / 10);
-	dstate_setinfo("battery.current", "%.2f", (double) (tab_reg[24]) / 10 );
-	dstate_setinfo("battery.runtime", "%u", tab_reg[23] );
-
-	dstate_setinfo("input.bypass.frequency", "%u", (tab_reg[18]/10) );
-	dstate_setinfo("output.frequency", "%u", (tab_reg[19]/10) );
+	if (tab_reg[4] != 0xFFFF)
+		dstate_setinfo("battery.charge", "%u", tab_reg[4] );
+	if (tab_reg[5] != 0xFFFF)
+		dstate_setinfo("battery.capacity", "%u", (tab_reg[5]/10) );
+	if (tab_reg[20] != 0xFFFF)
+		dstate_setinfo("battery.voltage", "%.2f", (double) (tab_reg[20]) / 10);
+	if (tab_reg[24] != 0xFFFF)
+		dstate_setinfo("battery.current", "%.2f", (double) (tab_reg[24]) / 10 );
+	if (tab_reg[23] != 0xFFFF)
+		dstate_setinfo("battery.runtime", "%u", tab_reg[23] );
+	
+	if (tab_reg[18] != 0xFFFF)
+		dstate_setinfo("input.bypass.frequency", "%u", (tab_reg[18]/10) );
+	if (tab_reg[19] != 0xFFFF)
+		dstate_setinfo("output.frequency", "%u", (tab_reg[19]/10) );
 
 	if (tab_reg[22] != 0xFFFF) {
+		dstate_setinfo("ups.temperature", "%u", tab_reg[22] );
 		dstate_setinfo("ambient.1.present", "yes");
 		dstate_setinfo("ambient.1.temperature", "%u", tab_reg[22] );
 	}
@@ -766,7 +820,7 @@ void upsdrv_shutdown(void)
 {
 	int r;
 	uint16_t val[16];
-
+	
 	uint8_t sch_delay_off_MSB = (uint8_t)((sch_delay_off & 0xFF00) >> 8);
 	uint8_t sch_delay_off_LSB = (uint8_t)(sch_delay_off & 0x00FF);
 	uint8_t sch_min_off_MSB = (uint8_t)((sch_min_off & 0xFF00) >> 8);
@@ -778,22 +832,13 @@ void upsdrv_shutdown(void)
 	val[3] = sch_min_off_LSB;
 	val[4] = sch_scheduletype;
 
-	upsdebugx(4, "sch_delay_off_MSB - MSB: %02x", sch_delay_off_MSB);
-	upsdebugx(4, "sch_delay_off_LSB - LSB: %02x", sch_delay_off_LSB);
-	upsdebugx(4, "sch_min_off_MSB - MSB Dec: %02x", sch_min_off_MSB);
-	upsdebugx(4, "sch_min_off_LSB - LSB Dec: %02x", sch_min_off_LSB);
-	
-	upsdebugx(2, "Schedule Delay OFF: %d seconds", (sch_delay_off_MSB << 8) | sch_delay_off_LSB);
-	upsdebugx(2, "Schedule Min OFF: %d minutes", (sch_min_off_MSB << 8) | sch_min_off_LSB);
-		
-	upslogx(LOG_NOTICE, "Shutdown UPS after [%d]secs and return with OL after [%d]secs", sch_delay_off, sch_min_off*60 );	
+	//No logging per spec only upslogx(LOG_ERR, ...) or upslog_with_errno(LOG_ERR, ...)
 
 	r = mwrs(modbus_ctx, 0x1580, 5, val);
-	
-	
-	if (r != 1){
+
+	if (r == -1) {
 		upslogx(LOG_ERR, "upsdrv_shutdown failed!");
-		set_exit_flag(-1);	
+		return;
 	}
 	else
 		set_exit_flag(-2);	/* EXIT_SUCCESS */
