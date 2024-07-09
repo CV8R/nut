@@ -31,7 +31,7 @@
 #include <modbus.h>
 
 #define DRIVER_NAME	"Socomec jbus driver"
-#define DRIVER_VERSION	"0.09.6"
+#define DRIVER_VERSION	"0.09.7"
 
 #define CHECK_BIT(var,pos) ((var) & (1<<(pos)))
 
@@ -77,6 +77,8 @@ void get_config_vars(void);
 int DISCHARGING_FLAG = -1;
 
 static int battery_charge_low = BATTERY_CHARGE_LOW_PERCENT;
+
+static int ups_model = -1;
 
 static uint16_t sch_delay_off = SCHEDULE_DELAY_OFF; 
 static uint16_t sch_min_off = SCHEDULE_MIN_OFF; //sch_min_off - minutes becuase UPS is set in minutes not secs.
@@ -389,22 +391,27 @@ void upsdrv_initinfo(void)
 	switch (tab_reg[0]) {
 		case 30:
 			dstate_setinfo("ups.model", "%s", "ITYS");   /* thanks to CV8R https://github.com/CV8R */
+			ups_model = 30;
 			break;
 
 		case 130:
 			dstate_setinfo("ups.model", "%s", "DIGYS");
+			ups_model = 130;
 			break;
 		
 		case 515:
 			dstate_setinfo("ups.model", "%s", "DELPHYS MX");
+			ups_model = 515;
 			break;
 		
 		case 516:
 			dstate_setinfo("ups.model", "%s", "DELPHYS MX elite");
+			ups_model = 516;
 			break;
 
 		default:
 			dstate_setinfo("ups.model", "Unknown Socomec JBUS. Send id %u and specify the model", tab_reg[0]);
+			ups_model = 130; //default to a previous driver model version for STATES 0x1020 length 6
 	}
 
 	if (tab_reg[3] && tab_reg[4] && tab_reg[5] && tab_reg[6] && tab_reg[7]) {
@@ -513,7 +520,15 @@ void upsdrv_updateinfo(void)
 		dstate_setinfo("ups.date", "%04d/%02d/%02d", (tab_reg[3]+2000), (tab_reg[2]>>8), (tab_reg[1]>>8) );
 
 	/* ups status */
-	r = mrir(modbus_ctx, 0x1020, 4, tab_reg);
+
+	if (ups_model == 30) {;
+		upsdebugx(4, "Request STATES (0x1020) Length 4");
+		r = mrir(modbus_ctx, 0x1020, 4, tab_reg);  //ITYS Gnereal Vector Index
+	}
+	else {
+		upsdebugx(4, "Request STATES (0x1020) Length 6");
+		r = mrir(modbus_ctx, 0x1020, 6, tab_reg);  //Per Genreal Map Data for MODBUS TCP DATA MAP IN SINGLE UNIT Length is 6, not 4.
+	}
 	
 	if (r == -1) {
 		upsdebugx(2, "Did not receive any data from the UPS at 0x1020 ! Ignoring ? r is %d error %s", r, modbus_strerror(errno));
@@ -522,6 +537,7 @@ void upsdrv_updateinfo(void)
 		return;
 		*/
 	}
+
 	if (CHECK_BIT(tab_reg[0], 0))
 		upsdebugx(2, "Rectifier Input supply present");
 	if ((CHECK_BIT(tab_reg[0], 0) != 0) && (CHECK_BIT(tab_reg[0], 5) == 0)) {
