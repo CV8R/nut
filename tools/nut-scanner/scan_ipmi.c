@@ -1,6 +1,8 @@
 /*
  *  Copyright (C)
  *    2011 - 2012  Arnaud Quette <arnaud.quette@free.fr>
+ *    2016 - 2021  EATON - Various threads-related improvements
+ *    2020 - 2024  Jim Klimov <jimklimov+nut@gmail.com>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -26,10 +28,11 @@
 #include "nut-scan.h"
 
 #ifdef WITH_IPMI
+
 #include "upsclient.h"
 #include <freeipmi/freeipmi.h>
-#include <stdio.h>
 #include <string.h>
+#include <stdio.h>
 #include <ltdl.h>
 
 #define NUT_IPMI_DRV_NAME	"nut-ipmipsu"
@@ -45,31 +48,31 @@ static const char *dl_error = NULL;
 
 #ifdef HAVE_FREEIPMI_11X_12X
   /* Functions symbols remapping */
-  #define IPMI_FRU_CLOSE_DEVICE_ID                     "ipmi_fru_close_device_id"
-  #define IPMI_FRU_CTX_DESTROY                         "ipmi_fru_ctx_destroy"
-  #define IPMI_FRU_CTX_CREATE                          "ipmi_fru_ctx_create"
-  #define IPMI_FRU_CTX_SET_FLAGS                       "ipmi_fru_ctx_set_flags"
-  #define IPMI_FRU_OPEN_DEVICE_ID                      "ipmi_fru_open_device_id"
-  #define IPMI_FRU_CTX_ERRORMSG                        "ipmi_fru_ctx_errormsg"
-  #define IPMI_FRU_READ_DATA_AREA                      "ipmi_fru_read_data_area"
-  #define IPMI_FRU_PARSE_NEXT                          "ipmi_fru_next"
+#  define IPMI_FRU_CLOSE_DEVICE_ID                     "ipmi_fru_close_device_id"
+#  define IPMI_FRU_CTX_DESTROY                         "ipmi_fru_ctx_destroy"
+#  define IPMI_FRU_CTX_CREATE                          "ipmi_fru_ctx_create"
+#  define IPMI_FRU_CTX_SET_FLAGS                       "ipmi_fru_ctx_set_flags"
+#  define IPMI_FRU_OPEN_DEVICE_ID                      "ipmi_fru_open_device_id"
+#  define IPMI_FRU_CTX_ERRORMSG                        "ipmi_fru_ctx_errormsg"
+#  define IPMI_FRU_READ_DATA_AREA                      "ipmi_fru_read_data_area"
+#  define IPMI_FRU_PARSE_NEXT                          "ipmi_fru_next"
   typedef ipmi_fru_ctx_t ipmi_fru_parse_ctx_t;
   typedef ipmi_sdr_ctx_t ipmi_sdr_cache_ctx_t;
   /* Functions remapping */
   static void (*nut_ipmi_sdr_ctx_destroy) (ipmi_sdr_ctx_t ctx);
 #else /* HAVE_FREEIPMI_11X_12X */
-  #define IPMI_FRU_AREA_SIZE_MAX                                   IPMI_FRU_PARSE_AREA_SIZE_MAX
-  #define IPMI_FRU_FLAGS_SKIP_CHECKSUM_CHECKS                      IPMI_FRU_PARSE_FLAGS_SKIP_CHECKSUM_CHECKS
-  #define IPMI_FRU_AREA_TYPE_MULTIRECORD_POWER_SUPPLY_INFORMATION  IPMI_FRU_PARSE_AREA_TYPE_MULTIRECORD_POWER_SUPPLY_INFORMATION
+#  define IPMI_FRU_AREA_SIZE_MAX                                   IPMI_FRU_PARSE_AREA_SIZE_MAX
+#  define IPMI_FRU_FLAGS_SKIP_CHECKSUM_CHECKS                      IPMI_FRU_PARSE_FLAGS_SKIP_CHECKSUM_CHECKS
+#  define IPMI_FRU_AREA_TYPE_MULTIRECORD_POWER_SUPPLY_INFORMATION  IPMI_FRU_PARSE_AREA_TYPE_MULTIRECORD_POWER_SUPPLY_INFORMATION
   /* Functions symbols remapping */
-  #define IPMI_FRU_CLOSE_DEVICE_ID                     "ipmi_fru_parse_close_device_id"
-  #define IPMI_FRU_CTX_DESTROY                         "ipmi_fru_parse_ctx_destroy"
-  #define IPMI_FRU_CTX_CREATE                          "ipmi_fru_parse_ctx_create"
-  #define IPMI_FRU_CTX_SET_FLAGS                       "ipmi_fru_parse_ctx_set_flags"
-  #define IPMI_FRU_OPEN_DEVICE_ID                      "ipmi_fru_parse_open_device_id"
-  #define IPMI_FRU_CTX_ERRORMSG                        "ipmi_fru_parse_ctx_errormsg"
-  #define IPMI_FRU_READ_DATA_AREA                      "ipmi_fru_parse_read_data_area"
-  #define IPMI_FRU_PARSE_NEXT                          "ipmi_fru_parse_next"
+#  define IPMI_FRU_CLOSE_DEVICE_ID                     "ipmi_fru_parse_close_device_id"
+#  define IPMI_FRU_CTX_DESTROY                         "ipmi_fru_parse_ctx_destroy"
+#  define IPMI_FRU_CTX_CREATE                          "ipmi_fru_parse_ctx_create"
+#  define IPMI_FRU_CTX_SET_FLAGS                       "ipmi_fru_parse_ctx_set_flags"
+#  define IPMI_FRU_OPEN_DEVICE_ID                      "ipmi_fru_parse_open_device_id"
+#  define IPMI_FRU_CTX_ERRORMSG                        "ipmi_fru_parse_ctx_errormsg"
+#  define IPMI_FRU_READ_DATA_AREA                      "ipmi_fru_parse_read_data_area"
+#  define IPMI_FRU_PARSE_NEXT                          "ipmi_fru_parse_next"
   /* Functions remapping */
   static void (*nut_ipmi_sdr_cache_ctx_destroy) (ipmi_sdr_cache_ctx_t ctx);
   static void (*nut_ipmi_sdr_parse_ctx_destroy) (ipmi_sdr_parse_ctx_t ctx);
@@ -406,6 +409,8 @@ nutscan_device_t * nutscan_scan_ipmi_device(const char * IPaddr, nutscan_ipmi_t 
 	/* Are we scanning locally, or over the network? */
 	if (IPaddr == NULL)
 	{
+		upsdebugx(2, "Entering %s for local device scan", __func__);
+
 		/* FIXME: we need root right to access local IPMI!
 		if (!ipmi_is_root ()) {
 			fprintf(stderr, "IPMI scan: %s\n", ipmi_ctx_strerror (IPMI_ERR_PERMISSION));
@@ -432,6 +437,8 @@ nutscan_device_t * nutscan_scan_ipmi_device(const char * IPaddr, nutscan_ipmi_t 
 		}
 	}
 	else {
+
+		upsdebugx(2, "Entering %s for %s", __func__, IPaddr);
 
 #if 0
 		if (ipmi_sec->ipmi_version == IPMI_2_0) {
@@ -569,6 +576,8 @@ nutscan_device_t * nutscan_scan_ipmi_device(const char * IPaddr, nutscan_ipmi_t 
 			}
 			else {
 				/* FIXME: also check against "localhost" and its IPv{4,6} */
+				/* FIXME: Should the IPv6 address here be bracketed?
+				 *  Does our driver support the notation? */
 				sprintf(port_id, "id%x@%s", ipmi_id, IPaddr);
 			}
 			nut_dev->port = strdup(port_id);
@@ -598,7 +607,35 @@ nutscan_device_t * nutscan_scan_ipmi_device(const char * IPaddr, nutscan_ipmi_t 
  * Return NULL on error, or a valid nutscan_device_t otherwise */
 nutscan_device_t * nutscan_scan_ipmi(const char * start_ip, const char * stop_ip, nutscan_ipmi_t * sec)
 {
-	nutscan_ip_iter_t ip;
+	nutscan_device_t	*ndret;
+
+	/* Are we scanning locally, or through the network? */
+	if (start_ip || stop_ip) {
+		nutscan_ip_range_list_t irl;
+
+		nutscan_init_ip_ranges(&irl);
+		nutscan_add_ip_range(&irl, (char *)start_ip, (char *)stop_ip);
+
+		ndret = nutscan_scan_ip_range_ipmi(&irl, sec);
+
+		/* Avoid nuking caller's strings here */
+		irl.ip_ranges->start_ip = NULL;
+		irl.ip_ranges->end_ip = NULL;
+		nutscan_free_ip_ranges(&irl);
+	} else {
+		/* Probe local device */
+		ndret = nutscan_scan_ip_range_ipmi(NULL, sec);
+	}
+
+	return ndret;
+}
+
+/* General IPMI scan entry point: scan 1 to n devices, local or remote,
+ * for IPMI support
+ * Return NULL on error, or a valid nutscan_device_t otherwise */
+nutscan_device_t * nutscan_scan_ip_range_ipmi(nutscan_ip_range_list_t * irl, nutscan_ipmi_t * sec)
+{
+	nutscan_ip_range_list_iter_t ip;
 	char * ip_str = NULL;
 	nutscan_ipmi_t * tmp_sec;
 	nutscan_device_t * nut_dev = NULL;
@@ -608,15 +645,28 @@ nutscan_device_t * nutscan_scan_ipmi(const char * start_ip, const char * stop_ip
 		return NULL;
 	}
 
-
 	/* Are we scanning locally, or through the network? */
-	if (start_ip == NULL)
+	if (irl == NULL || irl->ip_ranges == NULL)
 	{
-		/* Local PSU scan */
+		upsdebugx(1, "%s: Local PSU scan", __func__);
 		current_nut_dev = nutscan_scan_ipmi_device(NULL, NULL);
 	}
 	else {
-		ip_str = nutscan_ip_iter_init(&ip, start_ip, stop_ip);
+		/* TODO: Port HAVE_PTHREAD_TRYJOIN etc. from other files?
+		 * Notably, the scans below currently are only sequential
+		 * and so very slow (5 sec per IP timeout by default).
+		 */
+		if (irl->ip_ranges_count == 1
+		&& (irl->ip_ranges->start_ip == irl->ip_ranges->end_ip
+		    || !strcmp(irl->ip_ranges->start_ip, irl->ip_ranges->end_ip)
+		)) {
+			upsdebugx(1, "%s: Scanning remote PSU for single IP address: %s",
+				__func__, irl->ip_ranges->start_ip);
+		} else {
+			upsdebugx(1, "%s: Scanning remote PSU for IP address range(s): %s",
+				__func__, nutscan_stringify_ip_ranges(irl));
+		}
+		ip_str = nutscan_ip_ranges_iter_init(&ip, irl);
 
 		while (ip_str != NULL) {
 			tmp_sec = malloc(sizeof(nutscan_ipmi_t));
@@ -627,7 +677,7 @@ nutscan_device_t * nutscan_scan_ipmi(const char * start_ip, const char * stop_ip
 				current_nut_dev = nutscan_add_device_to_device(current_nut_dev, nut_dev);
 			}
 			/* Prepare the next iteration */
-			ip_str = nutscan_ip_iter_inc(&ip);
+			ip_str = nutscan_ip_ranges_iter_inc(&ip);
 		}
 	}
 
@@ -641,6 +691,15 @@ nutscan_device_t *  nutscan_scan_ipmi(const char * startIP, const char * stopIP,
 {
 	NUT_UNUSED_VARIABLE(startIP);
 	NUT_UNUSED_VARIABLE(stopIP);
+	NUT_UNUSED_VARIABLE(sec);
+
+	return NULL;
+}
+
+/* stub function */
+nutscan_device_t *  nutscan_scan_ip_range_ipmi(nutscan_ip_range_list_t * irl, nutscan_ipmi_t * sec)
+{
+	NUT_UNUSED_VARIABLE(irl);
 	NUT_UNUSED_VARIABLE(sec);
 
 	return NULL;

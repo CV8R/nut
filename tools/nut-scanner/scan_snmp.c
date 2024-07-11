@@ -1,6 +1,7 @@
 /*
  *  Copyright (C) 2011 - EATON
  *  Copyright (C) 2016-2021 - EATON - Various threads-related improvements
+ *  Copyright (C) 2020-2024 - Jim Klimov <jimklimov+nut@gmail.com> - support and modernization of codebase
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -31,9 +32,9 @@
 #ifdef WITH_SNMP
 
 #ifndef WIN32
-#include <sys/socket.h>
+# include <sys/socket.h>
 #else
-#undef _WIN32_WINNT
+# undef _WIN32_WINNT
 #endif
 
 #include <stdio.h>
@@ -43,39 +44,66 @@
 /* workaround for buggy Net-SNMP config
  * from drivers/snmp-ups.h */
 #ifdef PACKAGE_BUGREPORT
-#undef PACKAGE_BUGREPORT
+# undef PACKAGE_BUGREPORT
 #endif
 
 #ifdef PACKAGE_NAME
-#undef PACKAGE_NAME
+# undef PACKAGE_NAME
 #endif
 
 #ifdef PACKAGE_VERSION
-#undef PACKAGE_VERSION
+# undef PACKAGE_VERSION
 #endif
 
 #ifdef PACKAGE_STRING
-#undef PACKAGE_STRING
+# undef PACKAGE_STRING
 #endif
 
 #ifdef PACKAGE_TARNAME
-#undef PACKAGE_TARNAME
+# undef PACKAGE_TARNAME
 #endif
 
+#if (defined HAVE_PRAGMA_GCC_DIAGNOSTIC_PUSH_POP) && (defined HAVE_PRAGMA_GCC_DIAGNOSTIC_IGNORED_UNUSED_PARAMETER)
+# pragma GCC diagnostic push
+# pragma GCC diagnostic ignored "-Wunused-parameter"
+#endif
+#ifdef __clang__
+# pragma clang diagnostic push
+# pragma clang diagnostic ignored "-Wunused-parameter"
+#endif
+/* These tend to have inlined API implementations as empty braces,
+ * causing warnings about unused parameters.
+ */
 #include <net-snmp/net-snmp-config.h>
 #include <net-snmp/net-snmp-includes.h>
+
+#ifdef __clang__
+# pragma clang diagnostic pop
+#endif
+#if (defined HAVE_PRAGMA_GCC_DIAGNOSTIC_PUSH_POP) && (defined HAVE_PRAGMA_GCC_DIAGNOSTIC_IGNORED_UNUSED_PARAMETER)
+# pragma GCC diagnostic pop
+#endif
+
 #include "nutscan-snmp.h"
 
 /* Address API change */
 #if ( ! NUT_HAVE_LIBNETSNMP_usmAESPrivProtocol ) && ( ! defined usmAESPrivProtocol )
-#define USMAESPRIVPROTOCOL "usmAES128PrivProtocol"
-#define USMAESPRIVPROTOCOL_PTR usmAES128PrivProtocol
+# define USMAESPRIVPROTOCOL "usmAES128PrivProtocol"
+# define USMAESPRIVPROTOCOL_PTR usmAES128PrivProtocol
 #else
-#define USMAESPRIVPROTOCOL "usmAESPrivProtocol"
-#define USMAESPRIVPROTOCOL_PTR usmAESPrivProtocol
+# define USMAESPRIVPROTOCOL "usmAESPrivProtocol"
+# define USMAESPRIVPROTOCOL_PTR usmAESPrivProtocol
 #endif
 
 #define SysOID ".1.3.6.1.2.1.1.2.0"
+
+/* This variable collects device(s) from a sequential or parallel scan,
+ * is returned to caller, and cleared to allow subsequent independent scans */
+static nutscan_device_t * dev_ret = NULL;
+#ifdef HAVE_PTHREAD
+static pthread_mutex_t dev_mutex;
+#endif
+static useconds_t g_usec_timeout ;
 
 /* use explicit booleans */
 #ifndef FALSE
@@ -83,12 +111,6 @@ typedef enum ebool { FALSE = 0, TRUE } bool_t;
 #else
 typedef int bool_t;
 #endif
-
-static nutscan_device_t * dev_ret = NULL;
-#ifdef HAVE_PTHREAD
-static pthread_mutex_t dev_mutex;
-#endif
-static useconds_t g_usec_timeout ;
 
 #ifndef WITH_SNMP_STATIC
 /* dynamic link library stuff */
@@ -461,6 +483,8 @@ static void scan_snmp_add_device(nutscan_snmp_t * sec, struct snmp_pdu *response
 	dev = nutscan_new_device();
 	dev->type = TYPE_SNMP;
 	dev->driver = strdup("snmp-ups");
+	/* FIXME: Should the IPv6 address here be bracketed?
+	 *  Does our driver support the notation? */
 	dev->port = strdup(session->peername);
 	if (response != NULL) {
 		buf = malloc (response->variables->val_len + 1);
@@ -1004,31 +1028,52 @@ try_SysOID_free:
 nutscan_device_t * nutscan_scan_snmp(const char * start_ip, const char * stop_ip,
                                      useconds_t usec_timeout, nutscan_snmp_t * sec)
 {
+	nutscan_device_t	*ndret;
+	nutscan_ip_range_list_t irl;
+
+	nutscan_init_ip_ranges(&irl);
+	nutscan_add_ip_range(&irl, (char *)start_ip, (char *)stop_ip);
+
+	ndret = nutscan_scan_ip_range_snmp(&irl, usec_timeout, sec);
+
+	/* Avoid nuking caller's strings here */
+	irl.ip_ranges->start_ip = NULL;
+	irl.ip_ranges->end_ip = NULL;
+	nutscan_free_ip_ranges(&irl);
+
+	return ndret;
+}
+
+nutscan_device_t * nutscan_scan_ip_range_snmp(nutscan_ip_range_list_t * irl,
+                                     useconds_t usec_timeout, nutscan_snmp_t * sec)
+{
 	bool_t pass = TRUE; /* Track that we may spawn a scanning thread */
 	nutscan_device_t * result;
 	nutscan_snmp_t * tmp_sec;
-	nutscan_ip_iter_t ip;
+	nutscan_ip_range_list_iter_t ip;
 	char * ip_str = NULL;
+
 #ifdef HAVE_PTHREAD
 # ifdef HAVE_SEMAPHORE
 	sem_t * semaphore = nutscan_semaphore();
 	sem_t   semaphore_scantype_inst;
 	sem_t * semaphore_scantype = &semaphore_scantype_inst;
 # endif /* HAVE_SEMAPHORE */
-
-# ifdef WIN32
-	WSADATA WSAdata;
-	WSAStartup(2,&WSAdata);
-	atexit((void(*)(void))WSACleanup);
-# endif
-
-	pthread_t thread;
+  pthread_t thread;
 	nutscan_thread_t * thread_array = NULL;
 	size_t thread_count = 0, i;
 # if (defined HAVE_PTHREAD_TRYJOIN) || (defined HAVE_SEMAPHORE)
 	size_t  max_threads_scantype = max_threads_netsnmp;
 # endif
+#endif /* HAVE_PTHREAD */
 
+#ifdef WIN32
+	WSADATA WSAdata;
+	WSAStartup(2,&WSAdata);
+	atexit((void(*)(void))WSACleanup);
+#endif
+
+#ifdef HAVE_PTHREAD
 	pthread_mutex_init(&dev_mutex, NULL);
 
 # ifdef HAVE_SEMAPHORE
@@ -1056,7 +1101,11 @@ nutscan_device_t * nutscan_scan_snmp(const char * start_ip, const char * stop_ip
 				__func__);
 			max_threads_scantype = UINT_MAX - 1;
 		}
-		sem_init(semaphore_scantype, 0, (unsigned int)max_threads_scantype);
+
+		upsdebugx(4, "%s: sem_init() for %" PRIuSIZE " threads", __func__, max_threads_scantype);
+		if (sem_init(semaphore_scantype, 0, (unsigned int)max_threads_scantype)) {
+			upsdebug_with_errno(4, "%s: sem_init() failed", __func__);
+		}
 	}
 # endif /* HAVE_SEMAPHORE */
 
@@ -1064,6 +1113,23 @@ nutscan_device_t * nutscan_scan_snmp(const char * start_ip, const char * stop_ip
 
 	if (!nutscan_avail_snmp) {
 		return NULL;
+	}
+
+	if (irl == NULL || irl->ip_ranges == NULL) {
+		return NULL;
+	}
+
+	if (!irl->ip_ranges->start_ip) {
+		upsdebugx(1, "%s: no starting IP address specified", __func__);
+	} else if (irl->ip_ranges_count == 1
+		&& (irl->ip_ranges->start_ip == irl->ip_ranges->end_ip
+		    || !strcmp(irl->ip_ranges->start_ip, irl->ip_ranges->end_ip)
+	)) {
+		upsdebugx(1, "%s: Scanning SNMP for single IP address: %s",
+			__func__, irl->ip_ranges->start_ip);
+	} else {
+		upsdebugx(1, "%s: Scanning SNMP for IP address range(s): %s",
+			__func__, nutscan_stringify_ip_ranges(irl));
 	}
 
 	g_usec_timeout = usec_timeout;
@@ -1077,7 +1143,7 @@ nutscan_device_t * nutscan_scan_snmp(const char * start_ip, const char * stop_ip
 	/* Initialize the SNMP library */
 	(*nut_init_snmp)("nut-scanner");
 
-	ip_str = nutscan_ip_iter_init(&ip, start_ip, stop_ip);
+	ip_str = nutscan_ip_ranges_iter_init(&ip, irl);
 
 	while (ip_str != NULL) {
 #ifdef HAVE_PTHREAD
@@ -1100,8 +1166,21 @@ nutscan_device_t * nutscan_scan_snmp(const char * start_ip, const char * stop_ip
 			sem_wait(semaphore);
 			pass = TRUE;
 		} else {
-			pass = ((max_threads_scantype == 0 || sem_trywait(semaphore_scantype) == 0) &&
-			        sem_trywait(semaphore) == 0);
+			/* If successful (the lock was acquired),
+			 * sem_wait() and sem_trywait() will return 0.
+			 * Otherwise, -1 is returned and errno is set,
+			 * and the state of the semaphore is unchanged.
+			 */
+			int	stwST = sem_trywait(semaphore_scantype), stwS = sem_trywait(semaphore);
+			pass = ((max_threads_scantype == 0 || stwST == 0) && stwS == 0);
+			upsdebugx(4, "%s: max_threads_scantype=%" PRIuSIZE
+				" curr_threads=%" PRIuSIZE
+				" thread_count=%" PRIuSIZE
+				" stwST=%d stwS=%d pass=%d",
+				__func__, max_threads_scantype,
+				curr_threads, thread_count,
+				stwST, stwS, pass
+			);
 		}
 # else
 #  ifdef HAVE_PTHREAD_TRYJOIN
@@ -1124,6 +1203,7 @@ nutscan_device_t * nutscan_scan_snmp(const char * start_ip, const char * stop_ip
 				"(launched overall: %" PRIuSIZE "), "
 				"waiting until some would finish",
 				__func__, curr_threads, thread_count);
+
 			while (curr_threads >= max_threads
 			   || (curr_threads >= max_threads_scantype && max_threads_scantype > 0)
 			) {
@@ -1172,6 +1252,7 @@ nutscan_device_t * nutscan_scan_snmp(const char * start_ip, const char * stop_ip
 			}
 			upsdebugx(2, "%s: proceeding with scan", __func__);
 		}
+
 		/* NOTE: No change to default "pass" in this ifdef:
 		 * if we got to this line, we have a slot to use */
 #  endif /* HAVE_PTHREAD_TRYJOIN */
@@ -1211,17 +1292,20 @@ nutscan_device_t * nutscan_scan_snmp(const char * start_ip, const char * stop_ip
 #else   /* not HAVE_PTHREAD */
 			try_SysOID((void *)tmp_sec);
 #endif  /* if HAVE_PTHREAD */
+
+			/* Prepare the next iteration */
 /*			free(ip_str); */ /* Do not free() here - seems to cause a double-free instead */
-			ip_str = nutscan_ip_iter_inc(&ip);
+			ip_str = nutscan_ip_ranges_iter_inc(&ip);
 /*			free(tmp_sec); */
 		} else { /* if not pass -- all slots busy */
 #ifdef HAVE_PTHREAD
 # ifdef HAVE_SEMAPHORE
 			/* Wait for all current scans to complete */
 			if (thread_array != NULL) {
-				upsdebugx (2, "%s: Running too many scanning threads, "
+				upsdebugx (2, "%s: Running too many scanning threads (%"
+					PRIuSIZE "), "
 					"waiting until older ones would finish",
-					__func__);
+					__func__, thread_count);
 				for (i = 0; i < thread_count ; i++) {
 					int ret;
 					if (!thread_array[i].active) {
@@ -1250,7 +1334,7 @@ nutscan_device_t * nutscan_scan_snmp(const char * start_ip, const char * stop_ip
 			}
 # else
 #  ifdef HAVE_PTHREAD_TRYJOIN
-		/* TODO: Move the wait-loop for TRYJOIN here? */
+			/* TODO: Move the wait-loop for TRYJOIN here? */
 #  endif /* HAVE_PTHREAD_TRYJOIN */
 # endif  /* HAVE_SEMAPHORE */
 #endif   /* HAVE_PTHREAD */
@@ -1316,6 +1400,18 @@ nutscan_device_t * nutscan_scan_snmp(const char * start_ip, const char * stop_ip
 	NUT_UNUSED_VARIABLE(stop_ip);
 	NUT_UNUSED_VARIABLE(usec_timeout);
 	NUT_UNUSED_VARIABLE(sec);
+
+	return NULL;
+}
+
+/* stub function */
+nutscan_device_t * nutscan_scan_ip_range_snmp(nutscan_ip_range_list_t * irl,
+                                     useconds_t usec_timeout, nutscan_snmp_t * sec)
+{
+	NUT_UNUSED_VARIABLE(irl);
+	NUT_UNUSED_VARIABLE(usec_timeout);
+	NUT_UNUSED_VARIABLE(sec);
+
 	return NULL;
 }
 

@@ -1,6 +1,7 @@
 /*
  *  Copyright (C) 2012 - EATON
  *  Copyright (C) 2016-2021 - EATON - Various threads-related improvements
+ *  Copyright (C) 2020-2024 - Jim Klimov <jimklimov+nut@gmail.com> - support and modernization of codebase
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -29,7 +30,7 @@
 
 /* Need this on AIX when using xlc to get alloca */
 #ifdef _AIX
-#pragma alloca
+# pragma alloca
 #endif /* _AIX */
 
 #include <fcntl.h>
@@ -408,10 +409,15 @@ nutscan_device_t * nutscan_scan_eaton_serial(const char* ports_range)
 	char *current_port_name = NULL;
 	char **serial_ports_list;
 	int  current_port_nb;
+
 #ifdef HAVE_PTHREAD
 # ifdef HAVE_SEMAPHORE
 	sem_t * semaphore = nutscan_semaphore();
-# endif
+	/* TODO? Port semaphore_scantype / max_threads_scantype
+	 *  from sibling sources? We do not have that many serial
+	 *  ports to care much, usually... right?
+	 */
+# endif /* HAVE_SEMAPHORE */
 	pthread_t thread;
 	nutscan_thread_t * thread_array = NULL;
 	size_t thread_count = 0, i;
@@ -484,6 +490,7 @@ nutscan_device_t * nutscan_scan_eaton_serial(const char* ports_range)
 				"(launched overall: %" PRIuSIZE "), "
 				"waiting until some would finish",
 				__func__, curr_threads, thread_count);
+
 			while (curr_threads >= max_threads) {
 				for (i = 0; i < thread_count ; i++) {
 					int ret;
@@ -528,6 +535,7 @@ nutscan_device_t * nutscan_scan_eaton_serial(const char* ports_range)
 			}
 			upsdebugx(2, "%s: proceeding with scan", __func__);
 		}
+
 		/* NOTE: No change to default "pass" in this ifdef:
 		 * if we got to this line, we have a slot to use */
 #  endif /* HAVE_PTHREAD_TRYJOIN */

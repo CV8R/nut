@@ -2,6 +2,7 @@
  *  Copyright (C) 2011 - 2023 Arnaud Quette (Design and part of implementation)
  *  Copyright (C) 2011 - EATON
  *  Copyright (C) 2016-2021 - EATON - Various threads-related improvements
+ *  Copyright (C) 2020-2024 - Jim Klimov <jimklimov+nut@gmail.com> - support and modernization of codebase
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -46,6 +47,8 @@ static int (*nut_upscli_list_next)(UPSCONN_t *ups, size_t numq,
 			const char **query, size_t *numa, char ***answer);
 static int (*nut_upscli_disconnect)(UPSCONN_t *ups);
 
+/* This variable collects device(s) from a sequential or parallel scan,
+ * is returned to caller, and cleared to allow subsequent independent scans */
 static nutscan_device_t * dev_ret = NULL;
 #ifdef HAVE_PTHREAD
 static pthread_mutex_t dev_mutex;
@@ -156,6 +159,8 @@ static void * list_nut_devices(void * arg)
 	query[0] = "UPS";
 	numq = 1;
 
+	upsdebugx(2, "Entering %s for %s", __func__, target_hostname);
+
 	if ((*nut_upscli_splitaddr)(target_hostname, &hostname, &port) != 0) {
 		free(target_hostname);
 		free(nut_arg);
@@ -197,8 +202,11 @@ static void * list_nut_devices(void * arg)
 		/* NOTE: There is no driver by such name, in practice it could
 		 * be a dummy-ups relay, a clone driver, or part of upsmon config */
 		dev->driver = strdup(SCAN_NUT_DRIVERNAME);
-		/* +1+1 is for '@' character and terminating 0 */
-		buf_size = strlen(answer[1]) + strlen(hostname) + 1 + 1;
+		/* +1+1 is for '@' character and terminating 0,
+		 * and the other +1+1 is for possible '[' and ']'
+		 * around the host name:
+		 */
+		buf_size = strlen(answer[1]) + strlen(hostname) + 1 + 1 + 1 + 1;
 		if (port != PORT) {
 			/* colon and up to 5 digits */
 			buf_size += 6;
@@ -207,13 +215,31 @@ static void * list_nut_devices(void * arg)
 		dev->port = malloc(buf_size);
 
 		if (dev->port) {
+			/* Check if IPv6 and needs brackets */
+			char	*hostname_colon = strchr(hostname, ':');
+
+			if (hostname_colon && *hostname_colon == '\0')
+				hostname_colon = NULL;
+			if (*hostname == '[')
+				hostname_colon = NULL;
+
 			if (port != PORT) {
-				snprintf(dev->port, buf_size, "%s@%s:%" PRIu16,
-					answer[1], hostname, port);
+				if (hostname_colon) {
+					snprintf(dev->port, buf_size, "%s@[%s]:%" PRIu16,
+						answer[1], hostname, port);
+				} else {
+					snprintf(dev->port, buf_size, "%s@%s:%" PRIu16,
+						answer[1], hostname, port);
+				}
 			} else {
 				/* Standard port, not suffixed */
-				snprintf(dev->port, buf_size, "%s@%s",
-					answer[1], hostname);
+				if (hostname_colon) {
+					snprintf(dev->port, buf_size, "%s@[%s]",
+						answer[1], hostname);
+				} else {
+					snprintf(dev->port, buf_size, "%s@%s",
+						answer[1], hostname);
+				}
 			}
 #ifdef HAVE_PTHREAD
 			pthread_mutex_lock(&dev_mutex);
@@ -233,10 +259,28 @@ static void * list_nut_devices(void * arg)
 	return NULL;
 }
 
-nutscan_device_t * nutscan_scan_nut(const char* startIP, const char* stopIP, const char* port, useconds_t usec_timeout)
+nutscan_device_t * nutscan_scan_nut(const char* start_ip, const char* stop_ip, const char* port, useconds_t usec_timeout)
+{
+	nutscan_device_t	*ndret;
+	nutscan_ip_range_list_t irl;
+
+	nutscan_init_ip_ranges(&irl);
+	nutscan_add_ip_range(&irl, (char *)start_ip, (char *)stop_ip);
+
+	ndret = nutscan_scan_ip_range_nut(&irl, port, usec_timeout);
+
+	/* Avoid nuking caller's strings here */
+	irl.ip_ranges->start_ip = NULL;
+	irl.ip_ranges->end_ip = NULL;
+	nutscan_free_ip_ranges(&irl);
+
+	return ndret;
+}
+
+nutscan_device_t * nutscan_scan_ip_range_nut(nutscan_ip_range_list_t * irl, const char* port, useconds_t usec_timeout)
 {
 	bool_t pass = TRUE; /* Track that we may spawn a scanning thread */
-	nutscan_ip_iter_t ip;
+	nutscan_ip_range_list_iter_t ip;
 	char * ip_str = NULL;
 	char * ip_dest = NULL;
 	char buf[SMALLBUF];
@@ -245,11 +289,6 @@ nutscan_device_t * nutscan_scan_nut(const char* startIP, const char* stopIP, con
 	int change_action_handler = 0;
 #endif
 	struct scan_nut_arg *nut_arg;
-#ifdef WIN32
-	WSADATA WSAdata;
-	WSAStartup(2,&WSAdata);
-	atexit((void(*)(void))WSACleanup);
-#endif
 
 #ifdef HAVE_PTHREAD
 # ifdef HAVE_SEMAPHORE
@@ -263,7 +302,15 @@ nutscan_device_t * nutscan_scan_nut(const char* startIP, const char* stopIP, con
 # if (defined HAVE_PTHREAD_TRYJOIN) || (defined HAVE_SEMAPHORE)
 	size_t  max_threads_scantype = max_threads_oldnut;
 # endif
+#endif /* HAVE_PTHREAD */
 
+#ifdef WIN32
+	WSADATA WSAdata;
+	WSAStartup(2,&WSAdata);
+	atexit((void(*)(void))WSACleanup);
+#endif
+
+#ifdef HAVE_PTHREAD
 	pthread_mutex_init(&dev_mutex, NULL);
 
 # ifdef HAVE_SEMAPHORE
@@ -291,7 +338,11 @@ nutscan_device_t * nutscan_scan_nut(const char* startIP, const char* stopIP, con
 				__func__);
 			max_threads_scantype = UINT_MAX - 1;
 		}
-		sem_init(semaphore_scantype, 0, (unsigned int)max_threads_scantype);
+
+		upsdebugx(4, "%s: sem_init() for %" PRIuSIZE " threads", __func__, max_threads_scantype);
+		if (sem_init(semaphore_scantype, 0, (unsigned int)max_threads_scantype)) {
+			upsdebug_with_errno(4, "%s: sem_init() failed", __func__);
+		}
 	}
 # endif /* HAVE_SEMAPHORE */
 
@@ -299,6 +350,23 @@ nutscan_device_t * nutscan_scan_nut(const char* startIP, const char* stopIP, con
 
 	if (!nutscan_avail_nut) {
 		return NULL;
+	}
+
+	if (irl == NULL || irl->ip_ranges == NULL) {
+		return NULL;
+	}
+
+	if (!irl->ip_ranges->start_ip) {
+		upsdebugx(1, "%s: no starting IP address specified", __func__);
+	} else if (irl->ip_ranges_count == 1
+		&& (irl->ip_ranges->start_ip == irl->ip_ranges->end_ip
+		    || !strcmp(irl->ip_ranges->start_ip, irl->ip_ranges->end_ip)
+	)) {
+		upsdebugx(1, "%s: Scanning \"Old NUT\" bus for single IP address: %s",
+			__func__, irl->ip_ranges->start_ip);
+	} else {
+		upsdebugx(1, "%s: Scanning \"Old NUT\" bus for IP address range(s): %s",
+			__func__, nutscan_stringify_ip_ranges(irl));
 	}
 
 #ifndef WIN32
@@ -318,7 +386,7 @@ nutscan_device_t * nutscan_scan_nut(const char* startIP, const char* stopIP, con
 	}
 #endif
 
-	ip_str = nutscan_ip_iter_init(&ip, startIP, stopIP);
+	ip_str = nutscan_ip_ranges_iter_init(&ip, irl);
 
 	while (ip_str != NULL) {
 #ifdef HAVE_PTHREAD
@@ -341,8 +409,21 @@ nutscan_device_t * nutscan_scan_nut(const char* startIP, const char* stopIP, con
 			sem_wait(semaphore);
 			pass = TRUE;
 		} else {
-			pass = ((max_threads_scantype == 0 || sem_trywait(semaphore_scantype) == 0) &&
-			        sem_trywait(semaphore) == 0);
+			/* If successful (the lock was acquired),
+			 * sem_wait() and sem_trywait() will return 0.
+			 * Otherwise, -1 is returned and errno is set,
+			 * and the state of the semaphore is unchanged.
+			 */
+			int	stwST = sem_trywait(semaphore_scantype), stwS = sem_trywait(semaphore);
+			pass = ((max_threads_scantype == 0 || stwST == 0) && stwS == 0);
+			upsdebugx(4, "%s: max_threads_scantype=%" PRIuSIZE
+				" curr_threads=%" PRIuSIZE
+				" thread_count=%" PRIuSIZE
+				" stwST=%d stwS=%d pass=%d",
+				__func__, max_threads_scantype,
+				curr_threads, thread_count,
+				stwST, stwS, pass
+			);
 		}
 # else
 #  ifdef HAVE_PTHREAD_TRYJOIN
@@ -365,6 +446,7 @@ nutscan_device_t * nutscan_scan_nut(const char* startIP, const char* stopIP, con
 				"(launched overall: %" PRIuSIZE "), "
 				"waiting until some would finish",
 				__func__, curr_threads, thread_count);
+
 			while (curr_threads >= max_threads
 			   || (curr_threads >= max_threads_scantype && max_threads_scantype > 0)
 			) {
@@ -413,6 +495,7 @@ nutscan_device_t * nutscan_scan_nut(const char* startIP, const char* stopIP, con
 			}
 			upsdebugx(2, "%s: proceeding with scan", __func__);
 		}
+
 		/* NOTE: No change to default "pass" in this ifdef:
 		 * if we got to this line, we have a slot to use */
 #  endif /* HAVE_PTHREAD_TRYJOIN */
@@ -421,7 +504,7 @@ nutscan_device_t * nutscan_scan_nut(const char* startIP, const char* stopIP, con
 
 		if (pass) {
 			if (port) {
-				if (ip.type == IPv4) {
+				if (ip.curr_ip_iter.type == IPv4) {
 					snprintf(buf, sizeof(buf), "%s:%s", ip_str, port);
 				}
 				else {
@@ -470,16 +553,19 @@ nutscan_device_t * nutscan_scan_nut(const char* startIP, const char* stopIP, con
 #else  /* not HAVE_PTHREAD */
 			list_nut_devices(nut_arg);
 #endif /* if HAVE_PTHREAD */
+
+			/* Prepare the next iteration */
 			free(ip_str);
-			ip_str = nutscan_ip_iter_inc(&ip);
+			ip_str = nutscan_ip_ranges_iter_inc(&ip);
 		} else { /* if not pass -- all slots busy */
 #ifdef HAVE_PTHREAD
 # ifdef HAVE_SEMAPHORE
 			/* Wait for all current scans to complete */
 			if (thread_array != NULL) {
-				upsdebugx (2, "%s: Running too many scanning threads, "
+				upsdebugx (2, "%s: Running too many scanning threads (%"
+					PRIuSIZE "), "
 					"waiting until older ones would finish",
-					__func__);
+					__func__, thread_count);
 				for (i = 0; i < thread_count ; i++) {
 					int ret;
 					if (!thread_array[i].active) {
@@ -508,7 +594,7 @@ nutscan_device_t * nutscan_scan_nut(const char* startIP, const char* stopIP, con
 			}
 # else
 #  ifdef HAVE_PTHREAD_TRYJOIN
-		/* TODO: Move the wait-loop for TRYJOIN here? */
+			/* TODO: Move the wait-loop for TRYJOIN here? */
 #  endif /* HAVE_PTHREAD_TRYJOIN */
 # endif  /* HAVE_SEMAPHORE */
 #endif   /* HAVE_PTHREAD */
