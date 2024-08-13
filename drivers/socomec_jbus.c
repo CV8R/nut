@@ -31,7 +31,7 @@
 #include <modbus.h>
 
 #define DRIVER_NAME	"Socomec jbus driver"
-#define DRIVER_VERSION	"0.09.7"
+#define DRIVER_VERSION	"0.09.8"
 
 #define CHECK_BIT(var,pos) ((var) & (1<<(pos)))
 
@@ -44,7 +44,7 @@
 
 #define SCHEDULE_DELAY_OFF 30 //Seconds to pass before UPS goes into Standby | Allowed seconds 20 to 600 secs
 #define SCHEDULE_MIN_OFF 1 // Minutes of UPS Standby Operations | Allowed minutes 1 to 9999 mins
-#define SCHEDULING_TYPE 4 // Scheuling Type | Allowed 0, 1 or 4
+#define SCHEDULING_TYPE 4 // Scheduling Type | Allowed 0, 1 or 4
 
 /* SCHEDULING_TYPES
 0 = no scheduling / reset pendign schedule
@@ -561,16 +561,29 @@ void upsdrv_updateinfo(void)
 		upsdebugx(2, "Load protected by inverter");
 	if (CHECK_BIT(tab_reg[0], 4))
 		upsdebugx(2, "Load on automatic bypass");
-	if (CHECK_BIT(tab_reg[0], 5)){
+	
+	/* Battery test runs at a regular interval and flags onbatt so lets not flag OB if running test */
+	if ((CHECK_BIT(tab_reg[0], 10) != 0) && (CHECK_BIT(tab_reg[0], 5) != 0 )) { //If Battery test in progress and Load on Battery
+		upsdebugx(3, "Active battery test");
+		status_set("OL"); //Goes commbad if not setting status when running test.
+	}
+	
+	if ((CHECK_BIT(tab_reg[0], 10) == 0) && (CHECK_BIT(tab_reg[0], 5) != 0 )) { //If Battery test is not in progress and Load on Battery
 		upsdebugx(2, "Load on battery");
-		/* Set on Battery Condition */
+		// Set on Battery Condition
 		status_set("OB");
 		DISCHARGING_FLAG = 1; //Set we are now discharging
-		}
+	}
+
 	if (CHECK_BIT(tab_reg[0], 6))
 		upsdebugx(2, "Remote controls disable");
 	if (CHECK_BIT(tab_reg[0], 7))
 		upsdebugx(2, "Eco-mode ON");
+
+	if (CHECK_BIT(tab_reg[0], 10))
+		upsdebugx(2, "Battery Test in progress");
+	if (CHECK_BIT(tab_reg[0], 13))
+		upsdebugx(2, "Battery Test supported");
 
 	if (CHECK_BIT(tab_reg[0], 14))
 		upsdebugx(2, "Battery Test failed");
